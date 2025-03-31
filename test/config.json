@@ -1,0 +1,11 @@
+{
+    "key": "701990355eae469d87ca79642be368fc",
+    "openai": {
+        "apiUrl": "https://api.siliconflow.cn/v1",
+        "key": "sk-uncosuudsdmijslayqsgoriujjvjujenhzxgyiyqpshaqqpk",
+        "model": "deepseek-ai/DeepSeek-R1"
+    },
+    "hefeng": {
+        "key": "701990355eae469d87ca79642be368fc"
+    }
+}

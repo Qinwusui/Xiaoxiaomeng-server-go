@@ -1,23 +1,33 @@
 package main
 
 import (
-	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
+	"Xiaoxiaomeng-server/asr"
+	"Xiaoxiaomeng-server/location"
+	"Xiaoxiaomeng-server/openai"
+	"Xiaoxiaomeng-server/weather"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 type Message struct {
-	Data string
+	Data []byte
 	From string
 	To   string
 }
 type Connection struct {
-	Name string
-	conn *websocket.Conn
-	lock sync.Mutex
+	Name    string
+	conn    *websocket.Conn
+	lock    sync.Mutex
+	asrConn *websocket.Conn
 }
 type Connections struct {
 	Devices map[*Connection]bool
@@ -39,32 +49,135 @@ var Upgrader = websocket.Upgrader{
 var receiveChan = make(chan Message, 30)
 
 func main() {
+
 	log.Println("请暴露3456端口")
 	router := mux.NewRouter()
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		fmt.Fprintln(w, "haoue")
+	})
 	router.HandleFunc("/ws", WsHandler)
-	router.HandleFunc("/api/{command}", CommandHandler)
-	go func() {
-		for message := range receiveChan {
-			connections.lock.Lock()
-			rawMsg := strings.Replace(message.Data, "isNoReply:", "", -1)
-			isNoReply := strings.Contains(message.Data, "isNoReply:")
-			log.Println("收到", message.From, "发来的消息:", message.Data, "需要回复状态:", isNoReply)
-			for i := range connections.Devices {
-				if isNoReply {
-					if i.Name != message.From {
-						i.Send(Message{From: message.From, Data: rawMsg, To: i.Name})
-					}
-				} else {
-					i.Send(Message{From: message.From, Data: rawMsg, To: i.Name})
-				}
+	router.HandleFunc("/api/{command}", CommandHandler).Methods("GET")
+	router.HandleFunc("/api/weather/get", GetWeatherHandler)
+	router.HandleFunc("/api/location/get", GetLocationHandler)
+	router.HandleFunc("/api/chat", ChatHandler).Methods("POST")
 
-			}
-			connections.lock.Unlock()
-		}
-	}()
 	if err := http.ListenAndServe(":3456", router); err != nil {
 		log.Fatal(err)
 	}
+}
+func AsrHandler(w http.ResponseWriter, r *http.Request) {
+
+}
+func ChatHandler(w http.ResponseWriter, r *http.Request) {
+	userName, pwd, ok := r.BasicAuth()
+	if !ok {
+		w.WriteHeader(401)
+		return
+	}
+	if userName != "wusui" && pwd != "Qinsansui233..." {
+		log.Println("用户名密码不对")
+		w.WriteHeader(401)
+		return
+	}
+	defer r.Body.Close()
+	bts, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+	var respMap map[string]any
+	err = json.Unmarshal(bts, &respMap)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(400)
+		return
+	}
+	key := respMap["key"]
+	if key == nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	content := respMap["content"]
+	if content == nil {
+		log.Println("content为空")
+		w.WriteHeader(400)
+		return
+	}
+	model := respMap["model"].(string)
+	data, err := openai.Chat(content.(string), key.(string), model)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(400)
+		return
+	}
+	bts, err = json.Marshal(data)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(401)
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(bts)
+}
+func GetLocationHandler(w http.ResponseWriter, r *http.Request) {
+	userName, pwd, ok := r.BasicAuth()
+	if !ok {
+		log.Println("认证失败")
+		w.WriteHeader(401)
+		return
+	}
+	if userName != "wusui" && pwd != "Qinsansui233..." {
+		log.Println("用户名密码不对")
+		w.WriteHeader(401)
+		return
+	}
+
+	loc := r.URL.Query().Get("location")
+	if loc == "" {
+		w.WriteHeader(400)
+		log.Println("缺少location")
+		return
+	}
+	l, err := location.GetLocation(loc)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(400)
+
+		return
+	}
+	w.WriteHeader(200)
+	fmt.Fprintln(w, string(l))
+}
+func GetWeatherHandler(w http.ResponseWriter, r *http.Request) {
+	userName, pwd, ok := r.BasicAuth()
+	if !ok {
+		log.Println("认证失败")
+		w.WriteHeader(401)
+		return
+	}
+	if userName != "wusui" && pwd != "Qinsansui233..." {
+		log.Println("用户名密码不对")
+		w.WriteHeader(401)
+		return
+	}
+
+	location := r.URL.Query().Get("location")
+	if location == "" {
+		w.WriteHeader(400)
+		log.Println("缺少location")
+		return
+	}
+	w.WriteHeader(200)
+	we, err := weather.GetNowWeather(location)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+	w.WriteHeader(200)
+	fmt.Fprintln(w, string(we))
+
 }
 func CommandHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println(r.Header)
@@ -87,6 +200,7 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 	if device == "" {
 		device = r.Header.Get("Device")
 	}
+	log.Println(device)
 	if device == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		log.Println("错误的设备")
@@ -104,40 +218,97 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Println(device, "已连接")
+	asrClient, err := asr.Start()
+	if err != nil {
+		panic(err)
+	}
 	conn := &Connection{
-		conn: ws,
-		Name: device,
-		lock: sync.Mutex{},
+		conn:    ws,
+		Name:    device,
+		lock:    sync.Mutex{},
+		asrConn: asrClient,
 	}
 	go conn.Receive(receiveChan)
+	go func(c *Connection) {
+		for {
+			msgType, msg, err := c.asrConn.ReadMessage()
+			if err != nil {
+				log.Println("从百度读取消息失败", err)
+				time.Sleep(100 * time.Millisecond)
 
-	connections.lock.Lock()
-	if !connections.Devices[conn] {
-		connections.Devices[conn] = true
-	} else {
-		_ = conn.conn.Close()
-		delete(connections.Devices, conn)
-	}
-	connections.lock.Unlock()
+				c.conn.Close()
+				c.asrConn.Close()
+				break
+			}
+			if msgType == websocket.TextMessage {
+				log.Println("百度语音转文本返回数据", string(msg))
+				m	 := map[string]any{}
+				err := json.Unmarshal(msg, &m)
+				if err != nil {
+					continue
+				}
+
+				if t, ok := m["type"].(string); ok && t == "FIN_TEXT" {
+					if result, ok := m["result"].(string); ok && result != "" {
+						log.Println("百度识别到的最终文本", result)
+						log.Println("发送到Deepseek", result)
+						go func(r string) {
+							data, err := openai.Chat(r, "", "")
+							if err != nil {
+								log.Println("发送到deepseek失败了", err)
+							}
+							if d, ok := data.(map[string]any); ok {
+								if content, ok := d["content"].(string); ok {
+									log.Println("deepseek返回的数据", content)
+									c.conn.WriteMessage(websocket.TextMessage, []byte(content))
+								}
+							}
+						}(result)
+					}
+				}
+
+			}
+		}
+	}(conn)
+
 }
 func (c *Connection) Send(message Message) {
 
-	err := c.conn.WriteMessage(websocket.TextMessage, []byte(message.Data))
+	err := c.conn.WriteMessage(websocket.TextMessage, message.Data)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 }
 func (c *Connection) Receive(receiveChan chan<- Message) {
+
 	for {
 		messageType, i, err := c.conn.ReadMessage()
 		if err != nil {
-			receiveChan <- Message{Data: err.Error()}
+			log.Println(err)
+			c.conn.Close()
+			c.asrConn.Close()
 			break
 		}
+		//二进制流，直接转发到百度语音识别接口
+		if messageType == websocket.BinaryMessage {
+			err := c.asrConn.WriteMessage(messageType, i)
+
+			if err != nil {
+				log.Println("语音发送到百度失败", err)
+
+				continue
+			}
+		}
+		//文本类型，解析成json对象后检查json的类型
 		if messageType == websocket.TextMessage {
-			var str = string(i)
-			receiveChan <- Message{Data: str, From: c.Name, To: "any"}
+			var data map[string]any
+			err := json.Unmarshal(i, &data)
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
 		}
 	}
 }
