@@ -1,12 +1,13 @@
 package main
 
 import (
-	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 type Message struct {
@@ -125,6 +126,13 @@ func (c *Connection) Send(message Message) {
 	err := c.conn.WriteMessage(websocket.TextMessage, []byte(message.Data))
 	if err != nil {
 		log.Println(err)
+		c.lock.Lock()
+		defer c.lock.Unlock()
+		if c.conn != nil {
+			_ = c.conn.Close()
+			delete(connections.Devices, c)
+		}
+		log.Println("连接已关闭", c.Name)
 		return
 	}
 }
@@ -138,6 +146,9 @@ func (c *Connection) Receive(receiveChan chan<- Message) {
 		if messageType == websocket.TextMessage {
 			var str = string(i)
 			receiveChan <- Message{Data: str, From: c.Name, To: "any"}
+		}
+		if messageType == websocket.PingMessage {
+			log.Println("Ping message received from", c.Name)
 		}
 	}
 }
