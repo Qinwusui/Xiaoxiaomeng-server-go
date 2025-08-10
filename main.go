@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Xiaoxiaomeng-server/asr"
 	"Xiaoxiaomeng-server/location"
 	"Xiaoxiaomeng-server/openai"
 	"Xiaoxiaomeng-server/weather"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -216,61 +218,62 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Println(device, "已连接")
-	// asrClient, err := asr.Start()
+	asrClient, err := asr.Start()
 	if err != nil {
 		panic(err)
 	}
 	conn := &Connection{
-		conn: ws,
-		Name: device,
-		lock: sync.Mutex{},
-		// asrConn: asrClient,
+		conn:    ws,
+		Name:    device,
+		lock:    sync.Mutex{},
+		asrConn: asrClient,
 	}
 	connections.lock.Lock()
 	connections.Devices[conn] = true
 	connections.lock.Unlock()
 	go conn.Receive(receiveChan)
-	// go func(c *Connection) {
-	// 	for {
-	// 		msgType, msg, err := c.asrConn.ReadMessage()
-	// 		if err != nil {
-	// 			log.Println("从百度读取消息失败", err)
-	// 			time.Sleep(100 * time.Millisecond)
+	go func(c *Connection) {
+		for {
+			msgType, msg, err := c.asrConn.ReadMessage()
+			if err != nil {
+				log.Println("从百度读取消息失败", err)
+				time.Sleep(100 * time.Millisecond)
 
-	// 			c.conn.Close()
-	// 			// c.asrConn.Close()
-	// 			break
-	// 		}
-	// 		if msgType == websocket.TextMessage {
-	// 			log.Println("百度语音转文本返回数据", string(msg))
-	// 			m	 := map[string]any{}
-	// 			err := json.Unmarshal(msg, &m)
-	// 			if err != nil {
-	// 				continue
-	// 			}
+				c.conn.Close()
+				// c.asrConn.Close()
+				break
+			}
+			if msgType == websocket.TextMessage {
+				log.Println("百度语音转文本返回数据", string(msg))
+				m := map[string]any{}
+				err := json.Unmarshal(msg, &m)
+				if err != nil {
+					continue
+				}
 
-	// 			if t, ok := m["type"].(string); ok && t == "FIN_TEXT" {
-	// 				if result, ok := m["result"].(string); ok && result != "" {
-	// 					log.Println("百度识别到的最终文本", result)
-	// 					log.Println("发送到Deepseek", result)
-	// 					go func(r string) {
-	// 						data, err := openai.Chat(r, "", "")
-	// 						if err != nil {
-	// 							log.Println("发送到deepseek失败了", err)
-	// 						}
-	// 						if d, ok := data.(map[string]any); ok {
-	// 							if content, ok := d["content"].(string); ok {
-	// 								log.Println("deepseek返回的数据", content)
-	// 								c.conn.WriteMessage(websocket.TextMessage, []byte(content))
-	// 							}
-	// 						}
-	// 					}(result)
-	// 				}
-	// 			}
+				if t, ok := m["type"].(string); ok && t == "FIN_TEXT" {
+					if result, ok := m["result"].(string); ok && result != "" {
+						log.Println("百度识别到的最终文本", result)
+						log.Println("发送到Deepseek", result)
+						go func(r string) {
+							data, err := openai.Chat(r, "", "")
+							if err != nil {
+								log.Println("发送到deepseek失败了", err)
+							}
+							if d, ok := data.(map[string]any); ok {
+								if content, ok := d["content"].(string); ok {
+									log.Println("deepseek返回的数据", content)
+									//将数据转成语音返回
+									c.conn.WriteMessage(websocket.TextMessage, []byte(content))
+								}
+							}
+						}(result)
+					}
+				}
 
-	// 		}
-	// 	}
-	// }(conn)
+			}
+		}
+	}(conn)
 	for msg := range receiveChan {
 		data := string(msg.Data)
 		log.Println("收到消息", data)
@@ -333,18 +336,15 @@ func (c *Connection) Receive(receiveChan chan<- Message) {
 		if err != nil {
 			log.Println(err)
 			c.conn.Close()
-			// c.asrConn.Close()
+			c.asrConn.Close()
 			break
 		}
-		//二进制流，直接转发到百度语音识别接口
 		if messageType == websocket.BinaryMessage {
-			// err :x= c.asrConn.WriteMessage(messageType, i)
+			if err := c.asrConn.WriteMessage(websocket.BinaryMessage, i); err != nil {
+				log.Println(err)
+			}
+			continue
 
-			// if err != nil {
-			// 	log.Println("语音发送到百度失败", err)
-
-			// 	continue
-			// }
 		}
 		//文本类型，解析成json对象后检查json的类型
 		if messageType == websocket.TextMessage {
